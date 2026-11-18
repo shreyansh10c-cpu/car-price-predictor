@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
+import requests
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score
@@ -211,6 +212,37 @@ def predict_price(model, feature_cols, age, kms, engine_cc, ex_showroom, owners,
 
 
 # -----------------------------------------------------------------------------
+# 4b. LIVE CAR IMAGE (Wikipedia API - free, no API key required)
+# -----------------------------------------------------------------------------
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_car_image(brand, model):
+    """Fetch the car's photo from Wikipedia. Returns image URL or None."""
+    queries = [f"{brand} {model} car", f"{model} car"]
+    headers = {"User-Agent": "AutoValuateAI/3.1 (educational project)"}
+    for q in queries:
+        try:
+            r = requests.get(
+                "https://en.wikipedia.org/w/api.php",
+                params={"action": "query", "list": "search", "srsearch": q,
+                        "srlimit": 1, "format": "json"},
+                timeout=8, headers=headers)
+            hits = r.json().get("query", {}).get("search", [])
+            if not hits:
+                continue
+            r2 = requests.get(
+                "https://en.wikipedia.org/w/api.php",
+                params={"action": "query", "titles": hits[0]["title"],
+                        "prop": "pageimages", "pithumbsize": 800, "format": "json"},
+                timeout=8, headers=headers)
+            for p in r2.json().get("query", {}).get("pages", {}).values():
+                if "thumbnail" in p:
+                    return p["thumbnail"]["source"]
+        except Exception:
+            continue
+    return None
+
+
+# -----------------------------------------------------------------------------
 # 5. STREAMLIT UI
 # -----------------------------------------------------------------------------
 def main():
@@ -272,7 +304,7 @@ def main():
     st.sidebar.markdown("**👥 Project Co-Founders**")
     st.sidebar.caption("• **Kushagra Dubey**\n• **Shreyansh Pandey**\n• **Shivam Dubey**")
     st.sidebar.markdown("---")
-    st.sidebar.caption(f"🤖 RandomForest v3.0 · Real-model DB · Test R² = {test_r2:.1%}")
+    st.sidebar.caption(f"🤖 RandomForest v3.1 · Real-model DB · Live images · Test R² = {test_r2:.1%}")
 
     # ---------------- Prediction ----------------
     predicted_valuation = predict_price(model, feature_cols, age, kms_driven,
@@ -289,8 +321,26 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown(f"**{brand} {model_name}** · {fuel} · {engine_cc if engine_cc else 'EV'} cc · "
-                f"{registration_year} · {kms_driven:,} km · {owners} owner(s)")
+    img_url = get_car_image(brand, model_name)
+    img_col, info_col = st.columns([1, 2.4])
+    with img_col:
+        if img_url:
+            st.image(img_url, use_container_width=True,
+                     caption=f"{brand} {model_name} (image: Wikipedia)")
+        else:
+            st.markdown('<div style="background:#161b22;border:1px solid #30363d;border-radius:12px;'
+                        'height:230px;display:flex;align-items:center;justify-content:center;'
+                        'font-size:3.5rem;">🚗</div>', unsafe_allow_html=True)
+    with info_col:
+        st.markdown(f"### {brand} {model_name}")
+        st.markdown(f"**Fuel:** {fuel} &nbsp;·&nbsp; **Engine:** "
+                    f"{str(engine_cc) + ' cc' if engine_cc else 'Electric motor'}")
+        st.markdown(f"**Registration:** {registration_year} ({age} yr old) &nbsp;·&nbsp; "
+                    f"**KMs:** {kms_driven:,} km &nbsp;·&nbsp; **Owners:** {owners}")
+        st.markdown(f"**Current ex-showroom:** ₹{ex_showroom:,.2f} Lakh &nbsp;·&nbsp; "
+                    f"**Est. on-road:** ₹{ex_showroom * 1.12:,.2f} Lakh")
+
+    st.markdown("<br>", unsafe_allow_html=True)
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -316,6 +366,24 @@ def main():
             <div class="metric-label">Total Depreciation</div>
             <div class="metric-value">-{dep_pct:.1f}%</div>
             <div style="font-size:0.82rem; color:#f85149;">vs ex-showroom ₹{ex_showroom:.2f}L</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    c4, c5 = st.columns(2)
+    with c4:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">Current Ex-Showroom Price</div>
+            <div class="metric-value">₹{ex_showroom:,.2f} Lakh</div>
+            <div style="font-size:0.82rem; color:#8b949e;">Latest official price (model database)</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c5:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">Estimated On-Road Price</div>
+            <div class="metric-value">₹{ex_showroom * 1.12:,.2f} Lakh</div>
+            <div style="font-size:0.82rem; color:#8b949e;">Incl. RTO registration, insurance & taxes (+12%)</div>
         </div>
         """, unsafe_allow_html=True)
 
