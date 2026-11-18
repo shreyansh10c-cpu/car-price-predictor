@@ -1,3 +1,4 @@
+import re
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -212,34 +213,188 @@ def predict_price(model, feature_cols, age, kms, engine_cc, ex_showroom, owners,
 
 
 # -----------------------------------------------------------------------------
-# 4b. LIVE CAR IMAGE (Wikipedia API - free, no API key required)
+# 4b. LIVE CAR IMAGE  (Wikipedia + Wikimedia Commons - free, no API key)
+#     Pipeline:  manual override -> exact Wikipedia titles -> Wikipedia search
+#                -> Commons photo search (newest first) -> placeholder
 # -----------------------------------------------------------------------------
-@st.cache_data(ttl=86400, show_spinner=False)
+WIKI_API = "https://en.wikipedia.org/w/api.php"
+COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+HEADERS = {"User-Agent": "AutoValuateAI/3.3 (educational project; python-requests)"}
+
+CAR_WORDS = re.compile(
+    r"\b(car|cars|suv|hatchback|sedan|saloon|crossover|mpv|minivan|pickup|pick-up|"
+    r"vehicle|automobile|coupe|coupé|sport utility|subcompact|compact|off-road)\b", re.I)
+
+# Paste direct image URLs here to force a specific photo for any car, e.g.
+# ("Tata", "Punch"): "https://upload.wikimedia.org/....jpg"
+CAR_IMAGE_OVERRIDES = {}
+
+# Exact Wikipedia article titles for models whose names are not obvious.
+TITLE_HINTS = {
+    ("Maruti Suzuki", "Alto K10"):      ["Suzuki Alto", "Maruti Suzuki Alto"],
+    ("Maruti Suzuki", "S-Presso"):      ["Suzuki S-Presso", "Maruti Suzuki S-Presso"],
+    ("Maruti Suzuki", "Wagon R"):       ["Suzuki Wagon R", "Maruti Suzuki Wagon R"],
+    ("Maruti Suzuki", "Celerio"):       ["Suzuki Celerio", "Maruti Suzuki Celerio"],
+    ("Maruti Suzuki", "Swift"):         ["Suzuki Swift", "Maruti Suzuki Swift"],
+    ("Maruti Suzuki", "Baleno"):        ["Suzuki Baleno (2015)", "Suzuki Baleno (2022)", "Maruti Suzuki Baleno"],
+    ("Maruti Suzuki", "Fronx"):         ["Suzuki Fronx", "Maruti Suzuki Fronx"],
+    ("Maruti Suzuki", "Dzire"):         ["Suzuki Dzire", "Maruti Suzuki Dzire", "Suzuki Swift Dzire"],
+    ("Maruti Suzuki", "Brezza"):        ["Suzuki Brezza", "Maruti Suzuki Brezza", "Suzuki Vitara Brezza"],
+    ("Maruti Suzuki", "Ertiga"):        ["Suzuki Ertiga", "Maruti Suzuki Ertiga"],
+    ("Maruti Suzuki", "Ciaz"):          ["Suzuki Ciaz", "Maruti Suzuki Ciaz"],
+    ("Maruti Suzuki", "Grand Vitara"):  ["Suzuki Grand Vitara (2022)", "Maruti Suzuki Grand Vitara", "Suzuki Grand Vitara"],
+    ("Hyundai", "Grand i10 Nios"):      ["Hyundai Grand i10 Nios", "Hyundai Grand i10"],
+    ("Hyundai", "i20"):                 ["Hyundai i20 (2020)", "Hyundai i20", "Hyundai i20 (BC3)"],
+    ("Hyundai", "Verna"):               ["Hyundai Verna", "Hyundai Accent"],
+    ("Hyundai", "Alcazar"):             ["Hyundai Alcazar"],
+    ("Tata", "Punch"):                  ["Tata Punch", "Tata Punch (car)"],
+    ("Tata", "Altroz"):                 ["Tata Altroz"],
+    ("Mahindra", "XUV 3XO"):            ["Mahindra XUV 3XO", "Mahindra XUV300"],
+    ("Mahindra", "Scorpio-N"):          ["Mahindra Scorpio N", "Mahindra Scorpio"],
+    ("Mahindra", "XUV400 EV"):          ["Mahindra XUV400", "Mahindra XUV400 EV"],
+    ("Toyota", "Urban Cruiser Hyryder"): ["Toyota Urban Cruiser Hyryder", "Toyota Hyryder"],
+    ("Toyota", "Innova Crysta"):        ["Toyota Innova Crysta", "Toyota Innova"],
+    ("Toyota", "Innova HyCross"):       ["Toyota Innova HyCross", "Toyota Innova"],
+    ("Toyota", "Taisor"):               ["Toyota Taisor"],
+    ("Toyota", "Camry"):                ["Toyota Camry (XV80)", "Toyota Camry"],
+    ("Honda", "City"):                  ["Honda City", "Honda City (sixth generation)"],
+    ("Honda", "Elevate"):               ["Honda Elevate", "Honda WR-V (2023)"],
+    ("Kia", "Syros"):                   ["Kia Syros"],
+    ("Kia", "EV6"):                     ["Kia EV6"],
+    ("Volkswagen", "Tiguan"):           ["Volkswagen Tiguan"],
+    ("MG", "ZS EV"):                    ["MG ZS EV", "MG ZS"],
+    ("MG", "Windsor EV"):               ["MG Windsor EV", "MG Windsor", "Wuling Cloud EV"],
+    ("MG", "Hector"):                   ["MG Hector"],
+    ("Jeep", "Compass"):                ["Jeep Compass (MP)", "Jeep Compass"],
+    ("BMW", "3 Series"):                ["BMW 3 Series (G20)", "BMW 3 Series"],
+    ("BMW", "5 Series"):                ["BMW 5 Series (G60)", "BMW 5 Series"],
+    ("BMW", "X1"):                      ["BMW X1 (U11)", "BMW X1"],
+    ("BMW", "X3"):                      ["BMW X3 (G45)", "BMW X3 (G01)", "BMW X3"],
+    ("Audi", "A4"):                     ["Audi A4"],
+    ("Audi", "Q3"):                     ["Audi Q3"],
+    ("Mercedes-Benz", "C-Class"):       ["Mercedes-Benz C-Class (W206)", "Mercedes-Benz C-Class"],
+    ("Mercedes-Benz", "E-Class"):       ["Mercedes-Benz E-Class (W214)", "Mercedes-Benz E-Class"],
+    ("Mercedes-Benz", "GLC"):           ["Mercedes-Benz GLC (X254)", "Mercedes-Benz GLC-Class", "Mercedes-Benz GLC"],
+}
+
+BRAND_ALIASES = {
+    "Maruti Suzuki": ["Maruti Suzuki", "Suzuki"],
+}
+
+BAD_FILE_WORDS = re.compile(
+    r"interior|engine|logo|badge|dashboard|cockpit|wheel|seat|steering|console|"
+    r"emblem|rear view|taillight|headlight|brochure|poster|crash|accident|"
+    r"drawing|diagram|svg|map|screenshot|cutaway|battery|charging|speedometer", re.I)
+
+
+def _api_get(url, params):
+    p = dict(params)
+    p["format"] = "json"
+    p["formatversion"] = 2
+    r = requests.get(url, params=p, headers=HEADERS, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+
+def _is_car_page(page):
+    """A page qualifies only if it has a photo and its intro describes a car."""
+    if not page or page.get("missing") or "thumbnail" not in page:
+        return False
+    extract = (page.get("extract") or "")
+    low = extract.lower()
+    if "may refer to" in low or "disambiguation" in low:
+        return False
+    return bool(CAR_WORDS.search(extract))
+
+
+def _image_from_titles(titles):
+    """Look up many exact Wikipedia titles in one request; return the first valid car image."""
+    data = _api_get(WIKI_API, {
+        "action": "query", "titles": "|".join(titles[:20]), "redirects": 1,
+        "prop": "pageimages|extracts", "pithumbsize": 800, "exintro": 1,
+        "explaintext": 1, "exsentences": 2, "exlimit": "max"})
+    q = data.get("query", {})
+    pages = {p.get("title"): p for p in q.get("pages", [])}
+    norm = {n["from"]: n["to"] for n in q.get("normalized", [])}
+    redir = {r["from"]: r["to"] for r in q.get("redirects", [])}
+    for t in titles:                      # keep OUR priority order
+        t = norm.get(t, t)
+        t = redir.get(t, t)
+        page = pages.get(t)
+        if _is_car_page(page):
+            return page["thumbnail"]["source"]
+    return None
+
+
+def _image_from_search(brand, model):
+    """Wikipedia full-text search; check the top 6 hits instead of just 1."""
+    data = _api_get(WIKI_API, {
+        "action": "query", "generator": "search", "gsrsearch": f"{brand} {model} car",
+        "gsrlimit": 6, "prop": "pageimages|extracts", "pithumbsize": 800,
+        "exintro": 1, "explaintext": 1, "exsentences": 2, "exlimit": "max"})
+    pages = sorted(data.get("query", {}).get("pages", []), key=lambda p: p.get("index", 99))
+    key = max(re.findall(r"[A-Za-z0-9]+", model), key=len).lower()
+    for p in pages:
+        if key in p.get("title", "").lower() and _is_car_page(p):
+            return p["thumbnail"]["source"]
+    return None
+
+
+def _image_from_commons(brand, model):
+    """Search Wikimedia Commons photos; prefer the NEWEST (year in filename, then upload date)."""
+    data = _api_get(COMMONS_API, {
+        "action": "query", "generator": "search", "gsrnamespace": 6,
+        "gsrsearch": f"{brand} {model} {CURRENT_YEAR - 1}", "gsrlimit": 30,
+        "prop": "imageinfo", "iiprop": "url|size|timestamp|mime", "iiurlwidth": 800})
+    key = max(re.findall(r"[A-Za-z0-9]+", model), key=len).lower()
+    best, best_score = None, None
+    for p in data.get("query", {}).get("pages", []):
+        title = p.get("title", "")
+        info = (p.get("imageinfo") or [None])[0]
+        if not info or "jpeg" not in info.get("mime", ""):
+            continue
+        if BAD_FILE_WORDS.search(title) or key not in title.lower():
+            continue
+        w, h = info.get("width", 0), info.get("height", 1)
+        if w < 1200 or w < h * 1.15:      # want big, landscape, exterior shots
+            continue
+        years = [int(y) for y in re.findall(r"(20[0-3]\d)", title) if int(y) <= CURRENT_YEAR]
+        score = (max(years) if years else 0, info.get("timestamp", ""))
+        if best_score is None or score > best_score:
+            best, best_score = info.get("thumburl") or info.get("url"), score
+    return best
+
+
+@st.cache_data(ttl=43200, show_spinner=False)
 def get_car_image(brand, model):
-    """Fetch the car's photo from Wikipedia. Returns image URL or None."""
-    queries = [f"{brand} {model} car", f"{model} car"]
-    headers = {"User-Agent": "AutoValuateAI/3.1 (educational project)"}
-    for q in queries:
+    """Return (image_url, source_label) or (None, None)."""
+    if (brand, model) in CAR_IMAGE_OVERRIDES:
+        return CAR_IMAGE_OVERRIDES[(brand, model)], "manual override"
+
+    brands = BRAND_ALIASES.get(brand, [brand])
+    titles = list(TITLE_HINTS.get((brand, model), []))
+    for b in brands:
+        titles += [f"{b} {model}", f"{b} {model} (car)"]
+    titles += [f"{model} (car)", model]
+    seen, ordered = set(), []
+    for t in titles:
+        if t not in seen:
+            seen.add(t)
+            ordered.append(t)
+
+    stages = [
+        ("Wikipedia", lambda: _image_from_titles(ordered)),
+        ("Wikipedia search", lambda: _image_from_search(brand, model)),
+        ("Wikimedia Commons", lambda: _image_from_commons(brand, model)),
+    ]
+    for label, fn in stages:
         try:
-            r = requests.get(
-                "https://en.wikipedia.org/w/api.php",
-                params={"action": "query", "list": "search", "srsearch": q,
-                        "srlimit": 1, "format": "json"},
-                timeout=8, headers=headers)
-            hits = r.json().get("query", {}).get("search", [])
-            if not hits:
-                continue
-            r2 = requests.get(
-                "https://en.wikipedia.org/w/api.php",
-                params={"action": "query", "titles": hits[0]["title"],
-                        "prop": "pageimages", "pithumbsize": 800, "format": "json"},
-                timeout=8, headers=headers)
-            for p in r2.json().get("query", {}).get("pages", {}).values():
-                if "thumbnail" in p:
-                    return p["thumbnail"]["source"]
+            url = fn()
+            if url:
+                return url, label
         except Exception:
             continue
-    return None
+    return None, None
 
 
 # -----------------------------------------------------------------------------
@@ -372,11 +527,14 @@ def main():
     owners = st.sidebar.radio("Previous Owners", [1, 2, 3, 4], horizontal=True,
                               disabled=(age == 0), index=0)
 
+    custom_img_url = st.sidebar.text_input("🖼️ Custom image URL (optional)",
+                                           placeholder="Paste a direct car photo link (.jpg/.png)")
+
     st.sidebar.markdown("---")
     st.sidebar.markdown("**👥 Project Co-Founders**")
     st.sidebar.caption("• **Kushagra Dubey**\n• **Shreyansh Pandey**\n• **Shivam Dubey**")
     st.sidebar.markdown("---")
-    st.sidebar.caption(f"🤖 RandomForest v3.2 · Real-model DB · Live images · Test R² = {test_r2:.1%}")
+    st.sidebar.caption(f"🤖 RandomForest v3.3 · Real-model DB · Live images · Test R² = {test_r2:.1%}")
     gemini_key = st.sidebar.text_input("🔑 Gemini API key (optional, enables chat)",
                                        type="password", placeholder="Get a free key at aistudio.google.com")
 
@@ -395,16 +553,28 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    img_url = get_car_image(brand, model_name)
+    if custom_img_url.strip():
+        img_url, img_src = custom_img_url.strip(), "custom URL"
+    else:
+        img_url, img_src = get_car_image(brand, model_name)
+
     img_col, info_col = st.columns([1, 2.4])
     with img_col:
         if img_url:
-            st.image(img_url, use_container_width=True,
-                     caption=f"{brand} {model_name} (image: Wikipedia)")
-        else:
-            st.markdown('<div style="background:#161b22;border:1px solid #30363d;border-radius:12px;'
-                        'height:230px;display:flex;align-items:center;justify-content:center;'
-                        'font-size:3.5rem;">🚗</div>', unsafe_allow_html=True)
+            try:
+                st.image(img_url, use_container_width=True,
+                         caption=f"{brand} {model_name} (image: {img_src})")
+            except Exception:
+                img_url = None
+        if not img_url:
+            st.markdown(
+                f'<div style="background:#161b22;border:1px solid #30363d;border-radius:12px;'
+                f'height:230px;display:flex;flex-direction:column;align-items:center;'
+                f'justify-content:center;font-size:3.5rem;">🚗'
+                f'<span style="font-size:0.95rem;color:#8b949e;margin-top:8px;">'
+                f'{brand} {model_name}</span>'
+                f'<span style="font-size:0.75rem;color:#6e7681;">photo not found — paste a URL in the sidebar</span>'
+                f'</div>', unsafe_allow_html=True)
     with info_col:
         st.markdown(f"### {brand} {model_name}")
         st.markdown(f"**Fuel:** {fuel} &nbsp;·&nbsp; **Engine:** "
@@ -490,8 +660,6 @@ def main():
 
     with chart_right:
         st.subheader("📊 Feature Importance Impact")
-        features_list = ["Vehicle Age", "KMs Driven", "Engine CC",
-                         "Ex-Showroom Price", "Owners", "Fuel Type (one-hot)"][:len(model.feature_importances_)]
         importance_df = pd.DataFrame({
             "Feature": ["Vehicle Age", "KMs Driven", "Engine CC", "Ex-Showroom Price", "Owners"]
                         + [c for c in feature_cols if c.startswith("fuel_")],
