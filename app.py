@@ -243,6 +243,78 @@ def get_car_image(brand, model):
 
 
 # -----------------------------------------------------------------------------
+# 4c. AI ADVISOR ENGINE (rule-based insights, works offline)
+# -----------------------------------------------------------------------------
+def generate_advice(brand, model, fuel, age, kms, owners, value, ex_showroom):
+    """Auto-generated buying / selling / negotiation advice from valuation data."""
+    cc = MODEL_DATABASE[brand][model][1]
+    yearly_km = kms / max(age, 1)
+    expected = compute_market_value(ex_showroom, max(age, 1), kms, owners, fuel, cc, brand)
+    tips = []
+
+    if value <= expected * 0.95:
+        tips.append("🟢 **Deal verdict:** Below typical market value — this looks like a *good deal*.")
+    elif value >= expected * 1.05:
+        tips.append("🔴 **Deal verdict:** Above typical market range — *negotiate harder* or compare more listings.")
+    else:
+        tips.append("🟡 **Deal verdict:** Within the normal market range — fair if the condition checks out.")
+
+    if yearly_km > 15000:
+        tips.append(f"🔧 **High usage:** {yearly_km:,.0f} km/year (avg is ~10–12k). Use this as leverage to negotiate down.")
+    elif yearly_km < 7000 and age > 0:
+        tips.append(f"✨ **Low usage:** only {yearly_km:,.0f} km/year — a lightly driven car, slight premium is justified.")
+
+    if owners >= 3:
+        tips.append(f"👥 **Multiple owners:** {owners} owners raises transfer & maintenance risk — insist on full service records.")
+    elif owners == 2:
+        tips.append("👥 **Second owner:** normal, but verify the RC transfer history before paying.")
+
+    if age >= 10:
+        tips.append("🛠️ **Age:** 10+ year old car — budget for upcoming major service (suspension, tyres, belts).")
+
+    if fuel == "EV":
+        tips.append("🔋 **EV check:** ask for a battery State-of-Health (SOH) report — battery is 30–40% of the car's value.")
+    if fuel == "Diesel" and age >= 8:
+        tips.append("⚠️ **Diesel rule:** 10+ year old diesels are banned in Delhi-NCR — resale will be region-restricted.")
+
+    rf = BRAND_RETENTION.get(brand, 1.0)
+    if rf <= 0.85:
+        tips.append("📈 **Resale strength:** this brand holds value exceptionally well — low risk of a bad resale later.")
+    elif rf >= 1.08:
+        tips.append("📉 **Depreciation note:** luxury cars depreciate steeply — a *certified pre-owned* unit from an authorized dealer is safer.")
+
+    if value / ex_showroom < 0.35:
+        tips.append("💰 **Depreciated deep:** the car has already taken its biggest value hits — from here, depreciation is slow. Good long-term hold.")
+
+    tips.append(f"🤝 **Negotiation band:** if buying, open at **₹{value * 0.93:,.2f}L**; if selling, list at **₹{value * 1.06:,.2f}L** and settle near ₹{value:,.2f}L.")
+    return tips
+
+
+# -----------------------------------------------------------------------------
+# 4d. LLM CHAT ASSISTANT (optional - Google Gemini free API key)
+# -----------------------------------------------------------------------------
+SYSTEM_PROMPT = (
+    "You are AutoValuate AI, an expert Indian used-car valuation assistant. "
+    "Give short, practical advice on pricing, negotiation, inspection and resale. "
+    "Use INR Lakh for prices. Be honest about uncertainty."
+)
+
+
+def ask_gemini(api_key, car_context, history, question):
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"gemini-2.0-flash:generateContent?key={api_key}")
+    contents = [{"role": "user", "parts": [{"text": car_context}]}]
+    for m in history[-6:]:
+        contents.append({"role": "user" if m["role"] == "user" else "model",
+                         "parts": [{"text": m["content"]}]})
+    contents.append({"role": "user", "parts": [{"text": question}]})
+    payload = {"system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+               "contents": contents}
+    r = requests.post(url, json=payload, timeout=30)
+    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+
+
+# -----------------------------------------------------------------------------
 # 5. STREAMLIT UI
 # -----------------------------------------------------------------------------
 def main():
@@ -304,7 +376,9 @@ def main():
     st.sidebar.markdown("**👥 Project Co-Founders**")
     st.sidebar.caption("• **Kushagra Dubey**\n• **Shreyansh Pandey**\n• **Shivam Dubey**")
     st.sidebar.markdown("---")
-    st.sidebar.caption(f"🤖 RandomForest v3.1 · Real-model DB · Live images · Test R² = {test_r2:.1%}")
+    st.sidebar.caption(f"🤖 RandomForest v3.2 · Real-model DB · Live images · Test R² = {test_r2:.1%}")
+    gemini_key = st.sidebar.text_input("🔑 Gemini API key (optional, enables chat)",
+                                       type="password", placeholder="Get a free key at aistudio.google.com")
 
     # ---------------- Prediction ----------------
     predicted_valuation = predict_price(model, feature_cols, age, kms_driven,
@@ -431,6 +505,41 @@ def main():
             plot_bgcolor="rgba(0,0,0,0)", margin=dict(l=20, r=20, t=20, b=20),
             coloraxis_showscale=False, height=340)
         st.plotly_chart(fig_imp, use_container_width=True)
+
+    # ---------------- AI Assistant ----------------
+    st.divider()
+    st.subheader("🤖 AutoValuate AI Assistant")
+
+    with st.expander("📋 Instant smart advice for this car", expanded=True):
+        for tip in generate_advice(brand, model_name, fuel, age, kms_driven,
+                                   owners, predicted_valuation, ex_showroom):
+            st.markdown(f"- {tip}")
+
+    if gemini_key:
+        st.markdown("###### 💬 Chat with the AI assistant about this car")
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = []
+        car_context = (f"Car being evaluated: {brand} {model_name}, {fuel}, "
+                       f"{age} years old, {kms_driven:,} km, {owners} owner(s). "
+                       f"Ex-showroom ₹{ex_showroom:.2f}L. Estimated current market value "
+                       f"₹{predicted_valuation:.2f}L. Test R²={test_r2:.1%}.")
+        for m in st.session_state.chat_history:
+            st.chat_message(m["role"]).write(m["content"])
+        question = st.chat_input("e.g. Is this a fair price? What should I check before buying?")
+        if question:
+            st.session_state.chat_history.append({"role": "user", "content": question})
+            with st.spinner("Thinking..."):
+                try:
+                    answer = ask_gemini(gemini_key, car_context,
+                                        st.session_state.chat_history[:-1], question)
+                except Exception as e:
+                    answer = (f"⚠️ Could not reach the Gemini API ({e}). "
+                              "Check that the API key is valid and has quota.")
+            st.session_state.chat_history.append({"role": "assistant", "content": answer})
+            st.rerun()
+    else:
+        st.caption("💡 Add a free Gemini API key in the sidebar to unlock the conversational "
+                   "chat assistant (aistudio.google.com → Get API key).")
 
 
 if __name__ == "__main__":
